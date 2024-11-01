@@ -15,3 +15,4 @@ urlpatterns = [
     path('reset-password/', ResetPasswordView.as_view(), name='reset_password'),
 ]
 
+
