@@ -11,15 +11,32 @@ from django.contrib.auth import get_user_model
 from django.utils.translation import gettext_lazy as _
 
 class CustomUserManager(BaseUserManager):
-    def create_user(self, email, password=None, **extra_fields):
+    def create_unverified_user(self, email, password=None, **extra_fields):
         if not email:
             raise ValueError('Email is required')
         email = self.normalize_email(email)
-        user = self.model(email=email, **extra_fields)
-        user.set_password(password)
-        user.full_clean()  
+        user = self.model(email=email,is_active=False,registration_pending=True,**extra_fields)
+        
+        if password:
+            user.set_password(password)
+        return user
+    
+
+    def create_user(self, email, password=None, **extra_fields):
+        if not email:
+            raise ValueError('Email is required')
+            
+        email = self.normalize_email(email)
+        
+        user = self.model(email=email,is_active=False,**extra_fields)
+        
+        if password:
+            user.set_password(password)
+            
+        user.full_clean()
         user.save(using=self._db)
         return user
+
 
     def create_superuser(self, email, password=None, **extra_fields):
         extra_fields.setdefault('is_staff', True)
@@ -34,16 +51,21 @@ class CustomUserManager(BaseUserManager):
         return self.create_user(email, password, **extra_fields)
 
 class User(AbstractUser):
-    username = None 
+    username = None
     email = models.EmailField(unique=True, error_messages={'unique': 'A user with that email already exists.'})
-    first_name = models.CharField(_('first name'), max_length=150)
-    last_name = models.CharField(_('last name'), max_length=150)
+    phone_number = models.CharField(_('phone number'), max_length=15, unique=True)
+    first_name = models.CharField(_('first name'), max_length=150, blank=True)
+    last_name = models.CharField(_('last name'), max_length=150, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    is_active = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=False)
+    email_verified = models.BooleanField(default=False)
+    phone_verified = models.BooleanField(default=False)
+    registration_pending = models.BooleanField(default=True)
+
 
     USERNAME_FIELD = 'email'
-    REQUIRED_FIELDS = ['first_name', 'last_name']
+    REQUIRED_FIELDS = [ 'phone_number']
 
     objects = CustomUserManager()
 
@@ -51,6 +73,19 @@ class User(AbstractUser):
         verbose_name = _('user')
         verbose_name_plural = _('users')
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['email'],
+                condition=models.Q(registration_pending=False),
+                name='unique_verified_email'
+            ),
+            models.UniqueConstraint(
+                fields=['phone_number'],
+                condition=models.Q(registration_pending=False),
+                name='unique_verified_phone'
+            )
+        ]
+
 
     def __str__(self):
         return self.email
@@ -67,11 +102,17 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 #OTP MODEL 
 class OTP(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="otp_codes")
+    TYPE_CHOICES = (
+        ('EMAIL', 'Email'),
+        ('PASSOWROD_RESET', 'password_reset'),
+        ('PHONE', 'Phone')
+    )
+    user = models.ForeignKey(User, on_delete=models.CASCADE,null=True, related_name="otp_codes")
     code = models.CharField(max_length=6)
     created_at = models.DateTimeField(auto_now_add=True)
     is_verified = models.BooleanField(default=False)
     attempts = models.IntegerField(default=0)
+    type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='EMAIL')
 
     def is_valid(self):
         return (
@@ -81,12 +122,11 @@ class OTP(models.Model):
         )
 
     @classmethod
-    def create_otp_for_user(cls, user):
+    def create_otp_for_user(cls, user, otp_type='EMAIL'):
         
-        cls.objects.filter(user=user, is_verified=False).update(is_verified=True)
+        cls.objects.filter(user=user, is_verified=False, type=otp_type).update(is_verified=True)
         
-        #Generate otp of 4 digits
-        otp_code = ''.join([str(random.randint(0, 9)) for _ in range(4)])
-        return cls.objects.create(user=user, code=otp_code)
+        otp_code = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+        return cls.objects.create(user=user, code=otp_code, type=otp_type)
 
 

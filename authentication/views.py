@@ -10,10 +10,15 @@ from rest_framework_simplejwt.exceptions import TokenError
 from django.core.mail import send_mail
 from django.contrib.auth.models import User
 from django.conf import settings
-from .serializers import ForgotPasswordSerializer, ResetPasswordSerializer,VerifyOTPSerializer
+from .serializers import ForgotPasswordSerializer, ResetPasswordSerializer,VerifyOTPSerializer, VerifyRegistrationOTPSerializer, SendPhoneOTPSerializer, VerifyPhoneOTPSerializer 
 from .models import OTP  
 import logging
 from django.contrib.auth import get_user_model
+import requests
+from django.conf import settings
+from django.core.cache import cache
+import uuid
+import random
 
 
 # this is just a placeholder view for the deault path
@@ -27,18 +32,144 @@ class RegisterView(APIView):
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
         if serializer.is_valid():
-            user = serializer.save()
-            refresh = RefreshToken.for_user(user)
-            return Response({
-                'status': 'success',
-                'message': 'User registered successfully',
-                'user': UserSerializer(user).data,
-                'tokens': {
-                    'access': str(refresh.access_token),
-                    'refresh': str(refresh),
+            try:
+                
+                email = serializer.validated_data['email']
+                phone = serializer.validated_data['phone_number']
+                password = serializer.validated_data['password']
+
+                temp_user = User.objects.create_unverified_user(
+                    email=email,
+                    password=password,
+                    phone_number=phone,
+                    first_name=serializer.validated_data.get('first_name', ''),
+                    last_name=serializer.validated_data.get('last_name', '')
+                )
+
+                
+                # Generate OTPs
+                email_otp = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+                phone_otp = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+                
+                # Store in cache, this will/should be deleted after like 10 minutes
+                temp_user_id = str(uuid.uuid4())
+                cache_key = f"registration_{temp_user_id}"
+                
+                cache_data = {
+                    'user_dict': {
+                        'email': temp_user.email,
+                        'password': temp_user.password,  # This is already hashed by set_password
+                        'first_name': temp_user.first_name,
+                        'last_name': temp_user.last_name,
+                        'phone_number': temp_user.phone_number,
+                    },
+                    'email_otp': email_otp,
+                    'phone_otp': phone_otp
                 }
-            }, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+                cache.set(cache_key, cache_data, timeout=600)
+
+                # Send email OTP
+                send_mail(
+                    'Verify Your Email',
+                    f'Your email verification code is: {email_otp}\n'
+                    f'This code will expire in 10 minutes.',
+                    settings.DEFAULT_FROM_EMAIL,
+                    [email],
+                    fail_silently=False,
+                )
+
+                # Send phone OTP
+                api_key = settings.TWOFACTOR_API_KEY
+                url = f"https://2factor.in/API/V1/{api_key}/SMS/{phone}/{phone_otp}"
+                response = requests.get(url)
+                response_data = response.json()
+
+                if response_data['Status'] != 'Success':
+                    raise Exception("Failed to send phone OTP")
+
+                return Response({
+                    'success': True,
+                    'status': 'success',
+                    'message': 'Verification codes sent. Please verify both email and phone.',
+                    'temp_user_id': temp_user_id
+                }, status=status.HTTP_201_CREATED)
+
+            except Exception as e:
+                if 'cache_key' in locals():
+                    cache.delete(cache_key)
+                return Response({
+                    'success': False,
+                    'status': 'error',
+                    'message': str(e)
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            'success': False,
+            'status': 'error',
+            'errors': serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+    
+
+class VerifyRegistrationOTPView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = VerifyRegistrationOTPSerializer(data=request.data)
+        
+        if serializer.is_valid():
+            try:
+                cached_data = serializer.context['cached_data']
+                cache_key = serializer.context['cache_key']
+                
+                # Create and save the verified user
+                user_data = cached_data['user_dict']
+                user = User.objects.create(
+                    email=user_data['email'],
+                    password=user_data['password'],
+                    first_name=user_data['first_name'],
+                    last_name=user_data['last_name'],
+                    phone_number=user_data['phone_number'],
+                    is_active=True,
+                    email_verified=True,
+                    phone_verified=True,
+                    registration_pending=False
+                )
+                
+                # Clean up cache
+                cache.delete(cache_key)
+                
+                # Generate tokens
+                refresh = RefreshToken.for_user(user)
+                
+                return Response({
+                    'success': True,
+                    'status': 'success',
+                    'message': 'Registration completed successfully.',
+                    'user': UserSerializer(user).data,
+                    'tokens': {
+                        'access': str(refresh.access_token),
+                        'refresh': str(refresh),
+                    }
+                }, status=status.HTTP_200_OK)
+                
+            except Exception as e:
+                return Response({
+                    'success': False,
+                    'status': 'error',
+                    'message': str(e)
+                }, status=status.HTTP_400_BAD_REQUEST)
+                
+        return Response({
+            'success': False,
+            'status': 'error',
+            'errors': serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
@@ -54,6 +185,7 @@ class LoginView(APIView):
                 refresh = RefreshToken.for_user(user)
                 return Response({
                     'status': 'success',
+                    'success': True,
                     'message': 'Login successful',
                     'user': UserSerializer(user).data,
                     'tokens': {
@@ -62,10 +194,11 @@ class LoginView(APIView):
                     }
                 })
             return Response({
-                'status': 'error',
-                'message': 'Invalid credentials'
-            }, status=status.HTTP_401_UNAUTHORIZED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUES)
+            'success': False,
+            'status': 'error',
+            'errors': serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+        
 User = get_user_model()
 logger = logging.getLogger(__name__)
 
@@ -92,14 +225,16 @@ class ForgotPasswordView(APIView):
                     fail_silently=False,
                 )
                 return Response(
-                    {"message": "An OTP has been sent to the registered email."},
+                    {'success': True,
+                     "message": "An OTP has been sent to the registered email."},
                     status=status.HTTP_200_OK
                 )
             except Exception as e:
                 
                 logger.error(f"Failed to send password reset OTP to {email}: {str(e)}")
                 return Response(
-                    {"message": "Failed to send OTP. Please try again later."},
+                    {'success': False,
+                     "message": "Failed to send OTP. Please try again later."},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
 
@@ -113,10 +248,16 @@ class VerifyOTPView(APIView):
         if serializer.is_valid():
             serializer.save()
             return Response(
-                {"message": "OTP verified successfully. You can now reset your password."},
+                {'success': True,
+                 "message": "OTP verified successfully. You can now reset your password."},
                 status=status.HTTP_200_OK
             )
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'success': False,
+            'status': 'error',
+            'errors': serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
 
 class ResetPasswordView(APIView):
     def post(self, request):
@@ -125,12 +266,17 @@ class ResetPasswordView(APIView):
         if serializer.is_valid():
             serializer.save()
             return Response(
-                {"message": "Password reset successful"},
+                {'success': True,
+                 "message": "Password reset successful"},
                 status=status.HTTP_200_OK
             )
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'success': False,
+            'status': 'error',
+            'errors': serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
     
-    # TODO check the userview api in postman with header as Authorization p
 class UserView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -215,4 +361,70 @@ class RefreshViewNew(APIView):
             return Response({
                 'error': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
+        
+
+class SendPhoneOTPView(APIView):
+    permission_classes = [AllowAny]  
+
+    def post(self, request):
+        serializer = SendPhoneOTPSerializer(data=request.data)
+        if serializer.is_valid():
+            phone_number = serializer.validated_data['phone_number']
+            user = User.objects.get(phone_number=phone_number)
+
+            otp_instance = OTP.create_otp_for_user(user, otp_type='PHONE')
+
+            try:
+                api_key = settings.TWOFACTOR_API_KEY
+                url = f"https://2factor.in/API/V1/{api_key}/SMS/{phone_number}/{otp_instance.code}"
+                
+                response = requests.get(url)
+                response_data = response.json()
+
+                if response_data['Status'] == 'Success':
+                    return Response({
+                        'success': True,
+                        'status': 'success',
+                        'message': 'OTP sent successfully to your phone number.'
+                    }, status=status.HTTP_200_OK)
+                else:
+                    return Response({
+                        'success': False,
+                        'status': 'error',
+                        'message': 'Failed to send OTP. Please try again.'
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            except Exception as e:
+                logger.error(f"Failed to send phone OTP to {phone_number}: {str(e)}")
+                return Response({
+                    'success': False,
+                    'status': 'error',
+                    'message': 'Failed to send OTP. Please try again later.'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            'success': False,
+            'status': 'error',
+            'errors': serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class VerifyPhoneOTPView(APIView):
+    permission_classes = [AllowAny] 
+    def post(self, request):
+        serializer = VerifyPhoneOTPSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            return Response({
+                'success': True,
+                'status': 'success',
+                'message': 'Phone number verified successfully'
+            }, status=status.HTTP_200_OK)
+        return Response({
+            'success': False,
+            'status': 'error',
+            'errors': serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+
  
