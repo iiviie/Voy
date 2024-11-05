@@ -161,11 +161,14 @@ EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True   
-EMAIL_HOST_USER = config('EMAIL_HOST_USER')  
-EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD')
-DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+EMAIL_HOST_USER = "voyreply@gmail.com"
+EMAIL_HOST_PASSWORD ="tvww jltk cyvi izey"
+DEFAULT_FROM_EMAIL = "voyreply@gmail.com"
 
-TWOFACTOR_API_KEY = config('TWOFACTOR_API_KEY')
+TWOFACTOR_API_KEY =  'e3c11d10-977e-11ef-8b17-0200cd936042'
+
+
+
 
 CACHES = {
     'default': {

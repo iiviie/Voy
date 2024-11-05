@@ -118,6 +118,8 @@ class VerifyOTPSerializer(serializers.Serializer):
 
         except User.DoesNotExist:
             
+
+            
             raise serializers.ValidationError({"otp": "Invalid OTP."})
 
         return attrs
@@ -208,6 +210,7 @@ class VerifyRegistrationOTPSerializer(serializers.Serializer):
     def save(self):
         user = self.context['user']
         otp_instance = self.context['otp_instance']
+        
         
         otp_instance.is_verified = True
         otp_instance.save()

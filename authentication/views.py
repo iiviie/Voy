@@ -19,6 +19,8 @@ from django.conf import settings
 from django.core.cache import cache
 import uuid
 import random
+from datetime import timedelta
+from django.utils import timezone
 
 
 # this is just a placeholder view for the deault path
@@ -257,8 +259,7 @@ class VerifyOTPView(APIView):
             'status': 'error',
             'errors': serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
-
-
+    
 class ResetPasswordView(APIView):
     def post(self, request):
         serializer = ResetPasswordSerializer(data=request.data)
@@ -426,5 +427,50 @@ class VerifyPhoneOTPView(APIView):
             'errors': serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
+class ResendOTPView(APIView):
+    def post(self, request):
+        email = request.data.get('email')
+
+        try:
+            user = User.objects.get(email=email)
+            
+            # Check if an OTP exists and when it was last sent
+            otp_instance = OTP.objects.filter(user=user).order_by('-created_at').first()
+            if otp_instance:
+                time_since_last_otp = timezone.now() - otp_instance.created_at
+                if time_since_last_otp < timedelta(seconds=30):
+                    return Response(
+                        {"success": False, "message": "Please wait 30 seconds before requesting a new OTP."},
+                        status=status.HTTP_429_TOO_MANY_REQUESTS
+                    )
+            
+            # Create a new OTP for the user
+            new_otp = OTP.create_otp_for_user(user)
+            
+            # Send the new OTP via email
+            send_mail(
+                'Resend Password Reset OTP',
+                f'Your new OTP for password reset is: {new_otp.code}\n'
+                f'This code will expire in 10 minutes.',
+                settings.DEFAULT_FROM_EMAIL,
+                [email],
+                fail_silently=False,
+            )
+            return Response(
+                {'success': True, "message": "A new OTP has been sent to the registered email."},
+                status=status.HTTP_200_OK
+            )
+        
+        except User.DoesNotExist:
+            return Response(
+                {"success": False, "message": "User with this email does not exist."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger.error(f"Failed to resend OTP to {email}: {str(e)}")
+            return Response(
+                {"success": False, "message": "Failed to resend OTP. Please try again later."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
  
