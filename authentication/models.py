@@ -6,35 +6,51 @@ import random
 from django.utils import timezone
 from datetime import timedelta
 import logging
+from django.db import models, IntegrityError
 from django.contrib.auth import get_user_model
-
+from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 
-class CustomUserManager(BaseUserManager):
-    def create_unverified_user(self, email, password=None, **extra_fields):
-        if not email:
-            raise ValueError('Email is required')
-        email = self.normalize_email(email)
-        user = self.model(email=email,is_active=False,registration_pending=True,**extra_fields)
-        
-        if password:
-            user.set_password(password)
-        return user
-    
 
+class CustomUserManager(BaseUserManager):
+    
     def create_user(self, email, password=None, **extra_fields):
         if not email:
             raise ValueError('Email is required')
             
         email = self.normalize_email(email)
         
-        user = self.model(email=email,is_active=False,**extra_fields)
+        self.model.cleanup_expired_registrations(email=email)
+        
+        pending_user = self.model.objects.filter(
+            email=email,
+            registration_pending=True,
+            created_at__gt=timezone.now() - timedelta(minutes=5)
+        ).first()
+        
+        if pending_user:
+            time_remaining = (pending_user.created_at + timedelta(minutes=5) - timezone.now())
+            minutes = int(time_remaining.total_seconds() / 60)
+            seconds = int(time_remaining.total_seconds() % 60)
+            
+            if not pending_user.email_verified:
+                raise ValueError(f"Email verification pending. Please verify or wait {minutes}m {seconds}s.")
+            else:
+                raise ValueError(f"Phone verification pending. Please verify or wait {minutes}m {seconds}s.")
+        
+        extra_fields.setdefault('registration_pending', True)
+        extra_fields.setdefault('is_active', False)
+        user = self.model(email=email, **extra_fields)
         
         if password:
             user.set_password(password)
             
-        user.full_clean()
-        user.save(using=self._db)
+        try:
+            user.full_clean()
+            user.save(using=self._db)
+        except IntegrityError:
+            raise ValueError("An account with this email already exists.")
+            
         return user
 
 
@@ -52,8 +68,8 @@ class CustomUserManager(BaseUserManager):
 
 class User(AbstractUser):
     username = None
-    email = models.EmailField(unique=True, error_messages={'unique': 'A user with that email already exists.'})
-    phone_number = models.CharField(_('phone number'), max_length=15, unique=True)
+    email = models.EmailField(unique=True)
+    phone_number = models.CharField(_('phone number'), max_length=15)
     first_name = models.CharField(_('first name'), max_length=150, blank=True)
     last_name = models.CharField(_('last name'), max_length=150, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -62,7 +78,7 @@ class User(AbstractUser):
     email_verified = models.BooleanField(default=False)
     phone_verified = models.BooleanField(default=False)
     registration_pending = models.BooleanField(default=True)
-
+     
 
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = [ 'phone_number']
@@ -87,15 +103,51 @@ class User(AbstractUser):
         ]
 
 
+    @classmethod
+    def cleanup_expired_registrations(cls, email=None, phone_number=None):
+        expired_time = timezone.now() - timedelta(minutes=5)
+        
+        base_query = Q(
+            registration_pending=True,
+            created_at__lt=expired_time
+        )
+        
+        if email or phone_number:
+            specific_query = Q()
+            if email:
+                specific_query |= Q(email=email, registration_pending=True)
+            if phone_number:
+                specific_query |= Q(phone_number=phone_number, registration_pending=True)
+            
+            final_query = base_query | specific_query
+        else:
+            final_query = base_query
+            
+        deleted_count = cls.objects.filter(final_query).delete()[0]
+        return deleted_count
+
+
+    def save(self, *args, **kwargs):
+        if self._state.adding and self.registration_pending:
+            User.objects.filter(
+                Q(email=self.email) | Q(phone_number=self.phone_number),
+                registration_pending=True,
+                created_at__lt=timezone.now() - timedelta(minutes=5)
+            ).delete()
+        super().save(*args, **kwargs)
+
+    @property
+    def registration_expired(self):
+        if self.registration_pending:
+            return self.created_at < timezone.now() - timedelta(minutes=5)
+        return False
+
+
     def __str__(self):
         return self.email
 
     def get_full_name(self):
         return f"{self.first_name} {self.last_name}".strip()
-
-    def clean(self):
-        super().clean()
-        self.email = self.email.lower()
 
 
 User = get_user_model()
@@ -116,7 +168,7 @@ class OTP(models.Model):
     def is_valid(self):
         """Check if the OTP is still valid."""
         return (
-            timezone.now() <= self.created_at + timedelta(minutes=10) and
+            timezone.now() <= self.created_at + timedelta(minutes=5) and
             not self.is_verified and
             self.attempts < 3
         )

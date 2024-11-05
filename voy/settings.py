@@ -170,9 +170,5 @@ TWOFACTOR_API_KEY =  'e3c11d10-977e-11ef-8b17-0200cd936042'
 
 
 
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-    }
-}
+
 
