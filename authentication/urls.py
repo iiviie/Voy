@@ -19,3 +19,4 @@ urlpatterns = [
     path('resend-otp/', ResendOTPView.as_view(), name='resend-otp')
 ]
 
+
